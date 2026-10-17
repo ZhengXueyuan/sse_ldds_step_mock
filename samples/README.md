@@ -20,4 +20,10 @@ python sse_step_rebuild.py inspect --file samples\tick\step_tick_1001.bin --limi
 python sse_step_rebuild.py verify  --out samples
 ```
 
+起一个本地网关模拟器（监听 9001，全速播放，不带快照）：
+
+```bat
+python sse_step_rebuild.py serve --data samples --channels 1001 --topspeed --no-snapshots
+```
+
 注意：`--start-time`/`--max-events` 截断后 `ApplSeqNum` 从 1 重新连续编号，`MsgSeqNum` 1..500 连续；这只是抽样，不是完整交易日。

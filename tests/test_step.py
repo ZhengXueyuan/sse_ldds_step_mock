@@ -98,6 +98,26 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(entries[3][271], "6600")
         self.assertEqual(entries[3][290], "1")
 
+    def test_rewrap(self):
+        raw = step.encode_ub001(
+            seq=5, send_time="20261015-09:30:00.020",
+            security_type="01", channel=1001, appl_seq=42,
+            md_stream_id="MD002", security_id="600000",
+            transact_time=93000020, exec_type="0",
+            price_int=96500, qty=1000,
+            ext_fields=[(54, 2), (117, "275966")],
+        )
+        moved = step.rewrap_message(raw, new_seq=100, poss_dup=True,
+                                    poss_resend=True)
+        m = list(step.iter_messages(moved))[0]
+        self.assertEqual(m["seq"], 100)
+        self.assertEqual(step.get_field(m, 1181), "42")
+        self.assertEqual(step.get_field(m, 44), "9.65000")
+        hdr = dict(m["header"])
+        self.assertEqual(hdr.get(52), "20261015-09:30:00.020")
+        self.assertEqual(hdr.get(43), "Y")
+        self.assertEqual(hdr.get(97), "Y")
+
     def test_bad_checksum_detected(self):
         raw = bytearray(step.encode_ub001(
             seq=1, send_time="20261015-09:30:00.000",

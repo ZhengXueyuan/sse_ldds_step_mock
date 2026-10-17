@@ -114,6 +114,96 @@ def sending_time(trade_date: str, t) -> str:
 # Message builder
 # ---------------------------------------------------------------------------
 
+_HEADER_TAGS = {49, 56, 34, 43, 97, 52, 347}
+
+
+def rewrap_message(
+    raw,
+    new_seq: int,
+    sending_time: Optional[str] = None,
+    poss_dup: bool = False,
+    poss_resend: bool = False,
+    sender: str = "MDGW",
+    target: str = "VSS",
+    message_encoding: Optional[str] = "GBK",
+) -> bytes:
+    """Replace the session header (MsgSeqNum/52/43/97) of an existing message.
+
+    The application body bytes are preserved verbatim.  This is used by the
+    replay server to put messages from pre-generated per-channel files into one
+    continuous TCP session, and to mark retransmitted messages with
+    PossDupFlag/PossResend.
+    """
+    data = raw if isinstance(raw, (bytes, bytearray)) else bytes(raw)
+    start = data.find(BEGIN_FIELD)
+    if start < 0:
+        raise StepError("rewrap: BeginString not found")
+    if start:
+        data = data[start:]
+    p = len(BEGIN_FIELD)
+    if data[p:p + 2] != b"9=":
+        raise StepError("rewrap: BodyLength not second")
+    e = data.find(SOH, p)
+    if e < 0:
+        raise StepError("rewrap: unterminated BodyLength")
+    body_len = int(data[p + 2:e])
+    body_start = e + 1
+    body_end = body_start + body_len
+    if body_end > len(data) or data[body_end:body_end + 3] != b"10=":
+        raise StepError("rewrap: bad body/checksum boundary")
+
+    pos = body_start
+    msg_type = None
+    orig_52 = None
+    app_start = None
+    while pos < body_end:
+        soh = data.find(SOH, pos)
+        if soh < 0 or soh >= body_end:
+            raise StepError("rewrap: unterminated field")
+        eq = data.find(b"=", pos, soh)
+        if eq < 0:
+            raise StepError("rewrap: field without '='")
+        try:
+            tag = int(data[pos:eq])
+        except ValueError:
+            raise StepError("rewrap: bad tag")
+        if tag == 35:
+            msg_type = data[eq + 1:soh].decode("ascii")
+        elif tag == 52:
+            orig_52 = data[eq + 1:soh].decode("ascii")
+        if tag != 35 and tag not in _HEADER_TAGS:
+            app_start = pos
+            break
+        pos = soh + 1
+    if msg_type is None:
+        raise StepError("rewrap: MsgType missing")
+    if app_start is None:
+        app_start = body_end
+
+    st = sending_time if sending_time is not None else orig_52
+    body = bytearray()
+    body += b"35=" + msg_type.encode("ascii") + SOH
+    body += b"49=" + sender.encode("ascii") + SOH
+    body += b"56=" + target.encode("ascii") + SOH
+    body += b"34=" + str(new_seq).encode("ascii") + SOH
+    if st:
+        body += b"52=" + st.encode("ascii") + SOH
+    if poss_dup:
+        body += b"43=Y" + SOH
+    if poss_resend:
+        body += b"97=Y" + SOH
+    if message_encoding:
+        body += b"347=" + message_encoding.encode("ascii") + SOH
+    body += data[app_start:body_end]
+
+    msg = bytearray()
+    msg += BEGIN_FIELD
+    msg += b"9=" + str(len(body)).encode("ascii") + SOH
+    msg += body
+    msg += b"10=%03d" % (sum(msg) & 0xFF) + SOH
+    return bytes(msg)
+
+
 def encode_message(
     msg_type: str,
     seq: int,

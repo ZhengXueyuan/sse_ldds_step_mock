@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 out/
 out_*/
+*.idx
+*.idx.tmp

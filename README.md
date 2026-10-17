@@ -6,7 +6,9 @@
 * **逐笔行情**：`MsgType=UB001`，逐笔委托（新增/删除/产品状态）与逐笔成交按发生顺序混排；
 * **切片行情**：`MsgType=W`，每 3 秒一档的十档快照；
 * 可选按 TCP MSS（默认 1460 字节 = 1500 MTU）生成 **pcap**，把“几乎同时发生”的逐笔消息和
-  “一个 3 秒切片内全部合约”的快照消息打成网络包。
+  “一个 3 秒切片内全部合约”的快照消息打成网络包；
+* **实时网络模拟器 `serve`**：按通道监听 TCP，处理 Logon/心跳/UA001/UA002，连接建立后从头
+  按交易所时间播放，支持倍率、UA002 请求-重传。
 
 协议依据：`D:\doc\sse\IS120_上海证券交易所行情网关STEP数据接口规范0.62版_20260703.pdf`。
 
@@ -26,6 +28,12 @@ python sse_step_rebuild.py build --data D:\data\20261015 --out out --snapshot-la
 
 :: 4) 先跑一小批验证
 python sse_step_rebuild.py build --data D:\data\20261015 --out out_sample --codes 600000,600004,600009,600519 --max-events 2000 --max-snapshots 200
+
+:: 5) 启动本地行情网关模拟器：1001-1008 监听 9001-9008，1 倍速，登录后从头播放
+python sse_step_rebuild.py serve --data out --channels 1001-1008 --speed 1
+
+:: 6) 快速联调：全速 + 只发通道 1001 + 关闭快照
+python sse_step_rebuild.py serve --data out --channels 1001 --topspeed --no-snapshots
 ```
 
 校验与查看：
@@ -60,7 +68,7 @@ channel = 1001 + (合约数字部分 mod 8)
 
 `channels.json` 里有完整的通道 → 证券列表。源 CSV 不包含原通道号，本工具不做原通道
 推断，直接按上述规则重新分配到 1001-1008；因此原来的跨证券 `ApplSeqNum` 顺序只在
-单只证券内部可恢复，跨证券按时间归并（见第 5 节）。
+单只证券内部可恢复，跨证券按时间归并（见第 6 节）。
 
 ---
 
@@ -106,9 +114,109 @@ out/
 
 ---
 
-## 4. 字段映射
+## 4. 网络行情模拟器（serve）
 
-### 4.1 逐笔 `UB001`
+### 4.1 启动
+
+```bat
+:: 1001-1008 分别监听 9001-9008；登录后从文件头开始、按交易所时间 1 倍速播放
+python sse_step_rebuild.py serve --data out --channels 1001-1008 --speed 1
+
+:: 10 倍速；把长间隔（开市前、午休）压到最多 5 秒
+python sse_step_rebuild.py serve --data out --channels 1001 --speed 10
+
+:: 全速联调；只发通道 1001；不带快照
+python sse_step_rebuild.py serve --data out --channels 1001 --topspeed --no-snapshots
+
+:: 检查文件/索引/端口规划，不启动监听
+python sse_step_rebuild.py serve --data out --channels 1001-1008 --check
+```
+
+端口规则：通道 `N` → `--base-port + (N - 1001)`，默认 `9001..9008`。
+
+### 4.2 连接、登录与播放
+
+* 默认等客户端先发 `MsgType=A`（Logon）；服务端回 Logon（`98/108/1137/1407/1408`），
+  然后才开始播放；
+* **每个新连接都从播放窗口的第一条消息开始**（默认就是文件头）；`--start-time` /
+  `--end-time` 可限定窗口；
+* 服务端把每条数据消息重新封装进本会话的 `MsgSeqNum` 序列：Logon 为 1，之后所有数据、
+  心跳、UA001/UA002 应答连续递增；
+* 支持 `MsgType=0`（心跳）、`1`（TestRequest，回带 112 的心跳）、`5`（Logout）、
+  `2`（ResendRequest，回 `4` SequenceReset）；
+* 已登录后按 `HeartBtInt`（客户端 Logon 里的 108）在空闲时发心跳；
+* 逐笔频道空闲每 `--channel-heartbeat` 秒发一次 `UA001`，带 `1350 ApplLastSeqNum`；
+  播放结束时发一次 `10205=Y`（EndOfChannel）；
+* 播放结束后默认保持连接，继续处理心跳和 UA002；`--close-at-end` 可改为结束即断开。
+
+### 4.3 播放速率
+
+| 参数 | 说明 |
+|---|---|
+| `--speed N` | 相对交易所时间的倍率，1=实时，10=10 倍速 |
+| `--topspeed` | 不等待，尽可能快（联调用） |
+| `--pps N` | 固定每秒 N 条消息 |
+| `--mbps N` | 固定每秒 N 兆比特（按消息字节数计） |
+| `--max-gap-ms N` | 相邻消息的交易所时间差超过 N 毫秒时按 N 毫秒播放；默认 5000。设为 0 = 精确保留（开市前/午休会真的等） |
+| `--start-time` / `--end-time` | `HHMMSSsss`、`93000000` 或 `09:30:00.000` |
+
+第一条消息立即发送；之后按上表节流。倍率模式保留消息间的相对时间，只压缩超过
+`--max-gap-ms` 的长间隔。
+
+### 4.4 UA002 请求-重传
+
+客户端发现 `ApplSeqNum` 跳号后发：
+
+```
+35=UA002, 10201=频道, 10077=1, 1182=起始ApplSeqNum, 1183=结束ApplSeqNum
+```
+
+服务端行为：
+
+* 从 `.idx` 索引定位 `.bin` 中的原始 `UB001`，按区间重发；消息体/`ApplSeqNum` 不变，
+  只换成新的会话 `MsgSeqNum`；
+* 默认**不**置 `43 PossDupFlag` / `97 PossResend`：IS120 规定客户端按“频道 + 消息记录号”
+  去重，应用层重传用 `ApplSeqNum` 识别即可。需要 FIX 风格标记时加 `--mark-possdup`；
+* 重发完成后回 `UA002` 应答：`10076 ResendStatus`（1 全部完成 / 2 部分完成 /
+  3 无权限 / 4 不可用 / 5 正在重传中 / 99 其他）；
+* 每次最多重发 `--max-resend` 条（默认 200，规范建议 ≤200），超出返回状态 2；
+* 同一连接同一时间只处理一个重传请求；并发请求返回状态 5；
+* 重传期间暂停直播发送（同一 `stream_lock`），重传完成后恢复；
+* `1183=0` 时取文件的最后一条 `ApplSeqNum`（**整个预生成交易日**，不是当前直播位置）；
+  便于在回放中途补数据。需要严格“只补已发布数据”的语义时可自行按 `1350` 限制。
+
+快照 `W` 按规范**不支持重传**；全局快照端口收到 UA002 会回状态 4。
+
+### 4.5 索引
+
+首次 `serve` 会在每个逐笔 `.bin` 旁生成 `.idx`：
+
+* 索引记录每条消息的文件偏移，`ApplSeqNum` 连续，可直接 `O(1)` 定位；
+* 约 8 字节/条：单通道 22M 条约 176MB；`samples/` 的 500 条几乎为 0；
+* 缓存按 `.bin` 的 size/mtime 失效；`--rebuild-index` 强制重建；
+* 首次启动要扫描一遍逐笔文件（单通道 22M 条约几十秒），之后启动很快。
+
+### 4.6 快照
+
+* 默认把本通道的 `snapshot/step_snapshot_<ch>.bin` 与逐笔按交易所时间归并后在同一连接发送；
+* `--no-snapshots` 关闭；
+* `--snapshot-all-port 9100` 额外监听一个端口，播放 `snapshot/step_snapshot_all.bin`
+  （全市场一个流）；该端口只发 W、不支持 UA002；
+* 快照消息的会话 `MsgSeqNum` 同样重编号连续。
+
+### 4.7 限制
+
+* 不做用户名/密码认证（协议里 Username/Password 是预留字段），任何 Logon 都接受；
+* 每个 TCP 连接独立从窗口头开始，不做跨重连的会话续传；
+* 只实现 UA002 应用层重传，不实现 FIX 会话层按 MsgSeqNum 的历史重放（`2` 只回 `4`）；
+* `--no-logon` / `--start-on-connect` 是联调便利选项，会先发数据再回 Logon，非标准行为；
+* 模拟器把整个预生成交易日视为可重传数据（见 4.4）。
+
+---
+
+## 5. 字段映射
+
+### 5.1 逐笔 `UB001`
 
 公共头：`8=FIXT.1.1, 9=BodyLength, 35=UB001, 49=MDGW, 56=VSS, 34=MsgSeqNum,
 52=SendingTime(交易所时间), 347=GBK`。
@@ -145,7 +253,7 @@ out/
 > 逐笔委托/成交的 `QuoteID`、`BidApplSeqNum`、`OfferApplSeqNum` 都是源文件里的
 > **订单编号（交易所委托号）**，不是 `ApplSeqNum`。这是 IS120 2.5.4.2 的定义。
 
-### 4.2 切片 `W`
+### 5.2 切片 `W`
 
 | Tag | 值 | 说明 |
 |---:|---|---|
@@ -188,7 +296,7 @@ out/
 
 ---
 
-## 5. 还原口径与已知限制
+## 6. 还原口径与已知限制
 
 1. **ApplSeqNum 重编号**
    源文件是“按证券”的切片，`委托编号`/`成交编号` 是**原通道**的统一序号；同一通道内
@@ -226,10 +334,10 @@ out/
    `step_snapshot_all.bin`，按时间归并全市场 2356 只证券。两者是同一批 W 消息的不同组织方式。
 
 7. **会话消息**
-   默认只输出行情消息（UB001/W），不生成登录、心跳、频道心跳、重传应答。
-   每条输出文件被视为一条已经登录成功的独立行情会话；`MsgSeqNum` 从 1 开始。
-   如需 `UA001` 频道心跳或登录应答，可在 `step.py` 里直接调用
-   `encode_market_status`/`encode_message` 扩展。
+   `build` 生成的 `.bin` 只包含行情消息（UB001/W），不含登录、心跳、频道心跳、重传应答；
+   每条文件被视为一条已经登录成功的独立行情会话，`MsgSeqNum` 从 1 开始。
+   需要会话行为时用 `serve`，它会在同一 TCP 会话里加入 Logon、心跳、`UA001`、`UA002` 应答，
+   并把数据消息重新编号到该会话连续的 `MsgSeqNum`。
 
 8. **数据口径**
    行情价格按 `×1/10000` 处理（例如 `96500 -> 9.65000`）；成交量为股；成交金额为元。
@@ -238,7 +346,7 @@ out/
 
 ---
 
-## 6. 校验
+## 7. 校验
 
 `verify` 会逐条检查：
 
@@ -260,6 +368,17 @@ snap : 4,954 条
 所有消息的 `BodyLength`/`CheckSum` 均通过；pcap 已用 `scapy` 重组，载荷与 `.bin`
 逐字节一致（测试中逐笔/切片/全市场三种 pcap 都做了逐字节比较）。
 
+模拟器测试（`tests/test_serve.py`，`python -m unittest discover -s tests`）：
+
+* 客户端 Logon → 服务端 Logon（MsgSeqNum=1）→ 5 条 UB001 → UA001 EndOfChannel；
+* 全会话 `MsgSeqNum` 连续；
+* UA002 2..4 重发 3 条、`10076=1`；`43/97` 默认不置，`--mark-possdup` 时置 Y；
+* `1183=0` 时重发到文件末尾并回 `1183=最后一条`；
+* Logout 应答。
+
+另外用 `samples/` 手工验证过：100 倍速时约 318 秒的切片时间被压缩到 3.18 秒；
+逐笔空闲时 UA001 每 `--channel-heartbeat` 秒发送；全市场快照端口只发 W、UA002 回状态 4。
+
 QuickFIX 兼容性：消息是标准 FIXT.1.1 帧。QuickFIX/J、QuickFIX/C++ 使用自定义
 DataDictionary 即可解析；本仓库未附带 XML 字典（不同 QuickFIX 版本对 FIXT 传输字典/
 应用字典的加载方式不同），字段号与含义见上面的表和
@@ -268,7 +387,7 @@ DataDictionary 即可解析；本仓库未附带 XML 字典（不同 QuickFIX �
 
 ---
 
-## 7. 参数速查
+## 8. 参数速查
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -290,9 +409,13 @@ DataDictionary 即可解析；本仓库未附带 XML 字典（不同 QuickFIX �
 | `--channel-first` / `--channel-count` | `1001` / `8` | 通道编号规则 |
 | `--sender` / `--target` | `MDGW` / `VSS` | 49/56 的值 |
 
+`serve` 的参数见第 4.3、4.4 节；常用：`--channels`、`--base-port`、`--speed` /
+`--topspeed` / `--pps` / `--mbps`、`--max-gap-ms`、`--no-snapshots`、
+`--snapshot-all-port`、`--max-resend`、`--mark-possdup`。
+
 ---
 
-## 8. 性能
+## 9. 性能
 
 实测（本机，D: 盘同盘读写）：
 
@@ -305,18 +428,27 @@ DataDictionary 即可解析；本仓库未附带 XML 字典（不同 QuickFIX �
 全量粗估：逐笔约 170M 条、~38 GB；切片约 9M 条、~9 GB；合计 ~47 GB。
 8 通道并行约 **15–30 分钟**（pcap 另计，体积约 +15%）。实际以 `manifest.json` 为准。
 
+模拟器：
+
+* 首次启动建 `.idx`：`samples/` 500 条瞬时；整通道 22M 条约几十秒（之后走缓存）；
+* 100 倍速播放 `samples/`（含 100 条切片，交易所时间约 318 秒）实测 **3.18 秒**；
+* `--topspeed` 下 500 条逐笔 + 100 条切片 + UA001 在毫秒级发完；
+* UA002 重发 3 条 / 200 条均在毫秒级；重传期间直播暂停、完成后恢复。
+
 ---
 
-## 9. 代码结构
+## 10. 代码结构
 
 ```
 sse_step_rebuild.py      入口
 sse_step/
-  step.py                STEP/FIX 编码器 + 解析/校验器
+  step.py                STEP/FIX 编码器、消息重封装、解析/校验器
   source.py              Wind CSV 读取、通道映射、时间/序号检查
   build.py               通道归并、W/UB001 编码、pcap/MSS 打包
-  cli.py                 build / verify / inspect / channels 命令
-tests/test_step.py       单元测试（python -m unittest discover -s tests）
+  serve.py               TCP 网关模拟器、索引、播放节流、UA001/UA002、快照归并
+  cli.py                 build / verify / inspect / channels / serve 命令
+tests/test_step.py       编码/解析/校验/重封装单元测试
+tests/test_serve.py      网关模拟器集成测试（登录、播放、UA002、退出）
 samples/                 截断示例（600000.SH，09:30 起 500 条逐笔 + 100 条切片）
 docs/step_field_map.csv  STEP 字段号/类型/来源对照表
 ```

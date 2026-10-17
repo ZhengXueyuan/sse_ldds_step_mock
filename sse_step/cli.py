@@ -15,7 +15,7 @@ import traceback
 from collections import OrderedDict
 from typing import Dict, List
 
-from . import build, step
+from . import build, serve, step
 from .source import (
     channel_of,
     code_stem,
@@ -659,6 +659,97 @@ def cmd_channels(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+def _parse_channels(spec: str) -> List[int]:
+    out = set()
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return sorted(out)
+
+
+def cmd_serve(args) -> int:
+    data_dir = os.path.abspath(args.data)
+    if not os.path.isdir(data_dir):
+        print("error: data directory not found: %s" % data_dir, file=sys.stderr)
+        return 2
+    try:
+        channels = _parse_channels(args.channels)
+    except ValueError:
+        print("error: bad --channels %r" % args.channels, file=sys.stderr)
+        return 2
+    if not channels:
+        print("error: empty --channels", file=sys.stderr)
+        return 2
+    start_ms = step.time_to_ms(args.start_time) if args.start_time is not None else None
+    end_ms = step.time_to_ms(args.end_time) if args.end_time is not None else None
+    if start_ms is not None and end_ms is not None and end_ms < start_ms:
+        print("error: --end-time is before --start-time", file=sys.stderr)
+        return 2
+
+    cfg = {
+        "data_dir": data_dir,
+        "host": args.host,
+        "base_port": args.base_port,
+        "channels": channels,
+        "speed": args.speed,
+        "topspeed": args.topspeed,
+        "pps": args.pps,
+        "mbps": args.mbps,
+        "max_gap_ms": args.max_gap_ms,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "with_snapshots": not args.no_snapshots,
+        "snapshot_all_port": args.snapshot_all_port,
+        "heartbeat": args.heartbeat,
+        "channel_heartbeat": args.channel_heartbeat,
+        "require_logon": not args.no_logn,
+        "start_on_connect": args.start_on_connect,
+        "login_timeout": args.login_timeout,
+        "max_clients": args.max_clients,
+        "max_resend": args.max_resend,
+        "close_at_end": args.close_at_end,
+        "rebuild_index": args.rebuild_index,
+        "mark_possdup": args.mark_possdup,
+        "sender": args.sender,
+        "target": args.target,
+    }
+    serve.set_log_level(args.log_level)
+    srv = serve.GatewayServer(cfg)
+    if args.check:
+        srv.plan()
+        return 0
+    print("SSE STEP gateway simulator")
+    print("  data   : %s" % data_dir)
+    print("  host   : %s" % args.host)
+    print("  speed  : %s%s" % (
+        "topspeed" if args.topspeed else
+        ("%s pps" % args.pps) if args.pps else
+        ("%s mbps" % args.mbps) if args.mbps else ("%sx" % args.speed),
+        ", max_gap_ms=%s" % args.max_gap_ms))
+    print("  start  : %s" % ("on TCP connect" if args.start_on_connect
+                             else "after logon"))
+    try:
+        srv.run_forever()
+    except KeyboardInterrupt:
+        pass
+    except RuntimeError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print("error: cannot start listener: %s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
 
@@ -741,6 +832,56 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out")
     _add_common(c)
     c.set_defaults(func=cmd_channels)
+
+    s = sub.add_parser("serve", help="run a live STEP gateway simulator")
+    s.add_argument("--data", required=True,
+                   help="output directory produced by build (contains tick/ snapshot/)")
+    s.add_argument("--host", default="0.0.0.0", help="listen address (default 0.0.0.0)")
+    s.add_argument("--base-port", type=int, default=9001,
+                   help="port for channel 1001; channel N uses base+(N-1001)")
+    s.add_argument("--channels", default="1001-1008",
+                   help="channels to serve, e.g. 1001-1008 or 1001,1005")
+    s.add_argument("--speed", type=float, default=1.0,
+                   help="playback speed multiplier relative to exchange time (default 1.0)")
+    rate = s.add_mutually_exclusive_group()
+    rate.add_argument("--topspeed", action="store_true", help="no pacing")
+    rate.add_argument("--pps", type=int, help="fixed messages per second")
+    rate.add_argument("--mbps", type=float, help="fixed payload megabits per second")
+    s.add_argument("--max-gap-ms", type=int, default=5000,
+                   help="compress exchange gaps longer than this (0 = exact timing)")
+    s.add_argument("--start-time", type=_time_arg, help="playback start (HHMMSSsss)")
+    s.add_argument("--end-time", type=_time_arg, help="playback end (HHMMSSsss)")
+    s.add_argument("--no-snapshots", action="store_true",
+                   help="do not interleave W snapshots with UB001 ticks")
+    s.add_argument("--snapshot-all-port", type=int, default=0,
+                   help="optional port serving step_snapshot_all.bin")
+    s.add_argument("--heartbeat", type=int, default=30,
+                   help="session heartbeat interval seconds (default 30)")
+    s.add_argument("--channel-heartbeat", type=float, default=3.0,
+                   help="UA001 idle interval seconds (0 disables, default 3)")
+    s.add_argument("--no-logon", dest="no_logn", action="store_true",
+                   help="start playback on TCP connect without waiting for Logon")
+    s.add_argument("--start-on-connect", action="store_true",
+                   help="start playback immediately on TCP connect")
+    s.add_argument("--login-timeout", type=float, default=30.0,
+                   help="close connections that do not logon in N seconds")
+    s.add_argument("--max-clients", type=int, default=16)
+    s.add_argument("--max-resend", type=int, default=200,
+                   help="max UB001 messages per UA002 request (default 200)")
+    s.add_argument("--close-at-end", action="store_true",
+                   help="close the connection after playback (default: stay open)")
+    s.add_argument("--rebuild-index", action="store_true",
+                   help="rebuild .idx files even if present")
+    s.add_argument("--mark-possdup", action="store_true",
+                   help="set PossDupFlag/PossResend on resent UB001 messages "
+                        "(default: identify duplicates by unchanged ApplSeqNum)")
+    s.add_argument("--check", action="store_true",
+                   help="load files/indexes and print the plan, then exit")
+    s.add_argument("--log-level", choices=("debug", "info", "warn", "error"),
+                   default="info")
+    s.add_argument("--sender", default="MDGW")
+    s.add_argument("--target", default="VSS")
+    s.set_defaults(func=cmd_serve)
     return p
 
 
