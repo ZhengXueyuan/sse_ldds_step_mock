@@ -1,0 +1,69 @@
+tag,name,type,used_in,description,source
+8,BeginString,C16,all,FIXT.1.1,constant
+9,BodyLength,N9,all,bytes after 9= field through SOH before 10=,computed
+35,MsgType,C16,all,W / UB001 / h / A / 5 / 0 / 1 / 2 / 3 / 4,constant
+49,SenderCompID,C32,all,MDGW by default,--sender
+56,TargetCompID,C32,all,VSS by default,--target
+34,MsgSeqNum,N18,all,per output file from 1,counter
+43,PossDupFlag,Boolean,all,not emitted,-
+97,PossResend,Boolean,all,not emitted,-
+52,SendingTime,C21,all,YYYYMMDD-HH:mm:ss.sss,exchange time
+347,MessageEncoding,C16,all,GBK,constant
+10,CheckSum,C3,all,sum of bytes from 8= to before 10= mod 256,computed
+167,SecurityType,C2,UB001/W/h,01 = stock/fund/index/bond distribution,constant 01
+10201,ChannelNo,N4,UB001/UA001/UA002,1001-1008,1001 + code mod 8
+1181,ApplSeqNum,N18,UB001,continuous per output channel from 1,renumbered
+1500,MDStreamID,C5,UB001/W,MD002 = stocks,constant MD002
+48,SecurityID,C8,UB001/W,security code,交易所代码
+60,TransactTime,N9,UB001,HHMMSSsss,时间
+150,ExecType,C1,UB001,0 add / 4 delete / S product status / F trade,委托类型 / 成交
+44,Price,N14(5),UB001,order or trade price,委托价格 / 成交价格
+38,OrderQty,N16,UB001,order or trade quantity,委托数量 / 成交数量
+54,Side,C1,UB001 order,1 buy / 2 sell,委托代码 B/S
+117,QuoteID,C18,UB001 order,order id; on delete the deleted order id,交易所委托号
+10211,MemberID,C12,UB001 order,omitted (not in source),-
+10215,TraderCode,C12,UB001 order,omitted (not in source),-
+10116,BidApplSeqNum,C18,UB001 trade,buy order id,叫买序号
+10117,OfferApplSeqNum,C18,UB001 trade,sell order id,叫卖序号
+8504,TotalValueTraded,N17(2),UB001 trade / W,cumulative amount for W; trade amount for UB001,价格*数量 / 当日成交额
+10333,TradeMethod,N2,UB001 trade,0 = matched trade,constant 0
+58,Text,C1024,UB001 status,product status code E/I/O/J/C,委托代码
+339,TradSesMode,N1,W/h,3 = normal trading,constant 3
+75,TradeDate,N8,W,YYYYMMDD,自然日
+779,LastUpdateTime,N9,W,HHMMSSsss,时间
+140,PrevClosePx,N14(5),W,previous close,前收盘
+387,TotalVolumeTraded,N16,W,cumulative volume,当日累计成交量
+8503,NumTrades,N16,W,cumulative trade count,成交笔数
+268,NoMDEntries,N5,W,number of MD entry groups,computed
+269,MDEntryType,C2,W,0 bid / 1 ask / 2 last / 4 open / 5 close / 7 high / 8 low / 9 VWAP,computed
+270,MDEntryPx,N14(5),W,entry price,价格列
+271,MDEntrySize,N12,W,entry size for bid/ask,申买量/申卖量
+290,MDEntryPositionNo,N2,W,book level 0..9,derived
+8538,TradingPhaseCode,C8,W,phase flags,derived from time
+336,TradingSessionID,C8,h,8-char market status,not emitted by default
+393,TotNoRelatedSym,N8,h,max number of products,not emitted by default
+98,EncryptMethod,N8,A,0,not emitted
+108,HeartBtInt,N8,A,heartbeat seconds,not emitted
+141,ResetSeqNumFlag,Boolean,A,sequence reset flag,not emitted
+789,NextExpectedMsgSeqNum,N18,A,next expected sequence,not emitted
+553,Username,C32,A,reserved,not emitted
+554,Password,C32,A,reserved,not emitted
+1137,DefaultApplVerID,C8,A,9,not emitted
+1407,DefaultApplExtID,N8,A,124,not emitted
+1408,DefaultCstmApplVerID,C32,A,STEP1.20_SH_0.62,not emitted
+1409,SessionStatus,N4,5,logout status,not emitted
+112,TestReqID,C32,0/1,test request id,not emitted
+7,BeginSeqNo,N18,2,resend start,not emitted
+16,EndSeqNo,N18,2,resend end,not emitted
+45,RefSeqNum,N18,3,rejected sequence,not emitted
+371,RefTagID,N6,3,rejected tag,not emitted
+372,RefMsgType,C16,3,rejected message type,not emitted
+373,SessionRejectReason,N5,3,reject reason,not emitted
+123,GapFillFlag,Boolean,4,gap fill,not emitted
+36,NewSeqNo,N18,4,new sequence,not emitted
+1350,ApplLastSeqNum,N18,UA001,last published record number,not emitted
+10205,EndOfChannel,Boolean,UA001,end of channel flag,not emitted
+10077,ResendType,N2,UA002,1 = tick,not emitted
+1182,ApplBegSeqNum,N18,UA002,resend begin,not emitted
+1183,ApplEndSeqNum,N18,UA002,resend end,not emitted
+10076,ResendStatus,N2,UA002,resend status,not emitted
